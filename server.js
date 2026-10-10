@@ -4,6 +4,8 @@ const path = require('path');
 const dotenv = require('dotenv');
 const dns = require("node:dns");
 
+dns.setServers(["1.1.1.1", "8.8.8.8"]); 
+
 // Load environment variables from root .env file
 dotenv.config({ path: path.resolve(__dirname, 'server.env') });
 
