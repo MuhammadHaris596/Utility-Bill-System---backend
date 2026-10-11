@@ -59,13 +59,15 @@ app.use(async (req, res, next) => {
   }
 });
 
-app.get('/',(req,res)=>{
+app.get('/', (req, res) => {
+  return res.send("Backend is running.");
+});
 
-  return  res.send("Backend is running.");
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Backend is running' });
 });
-})
+
+
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
@@ -75,7 +77,7 @@ app.use('/api/bills', require('./routes/bills'));
 app.use(errorHandler);
 
 // Only run a local server when NOT on Vercel (local dev)
-if (process.env.VERCEL !== '1') {
+if (!process.env.VERCEL) {
   const PORT = process.env.PORT || 5000;
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
