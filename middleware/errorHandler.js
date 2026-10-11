@@ -27,6 +27,9 @@ const errorHandler = (err, req, res, next) => {
 
   res.status(statusCode).json({
     message: responseMessage,
+    // TEMPORARY DEBUG: masla fix hone ke baad ye 2 lines hata dena
+    debug: err.message,
+    name: err.name,
   });
 };
 
