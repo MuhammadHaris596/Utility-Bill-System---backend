@@ -2,14 +2,14 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
-const dns = require("node:dns");
+const dns = require('node:dns');
 
-dns.setServers(["1.1.1.1", "8.8.8.8"]); 
+// Local-only setup (Vercel par iski zaroorat nahi)
+if (!process.env.VERCEL) {
+  dns.setServers(['1.1.1.1', '8.8.8.8']);
+  dotenv.config({ path: path.resolve(__dirname, 'server.env') });
+}
 
-// Load environment variables from root .env file
-dotenv.config({ path: path.resolve(__dirname, 'server.env') });
-
-dns.setServers(["1.1.1.1", "8.8.8.8"]);
 const connectDB = require('./config/db');
 const Admin = require('./models/Admin');
 const errorHandler = require('./middleware/errorHandler');
@@ -21,8 +21,14 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static uploads
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Health routes: DB middleware se PEHLE, taake DB fail hone par bhi test ho sakein
+app.get('/', (req, res) => res.send('Backend is running.'));
+app.get('/health', (req, res) => res.json({ status: 'ok', message: 'Backend is running' }));
+
+// Static uploads (sirf local; Vercel par disk read-only hai)
+if (!process.env.VERCEL) {
+  app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+}
 
 // Seed default admin ONLY if the Admin collection is completely empty
 const seedAdmin = async () => {
@@ -44,7 +50,7 @@ const seedAdmin = async () => {
   }
 };
 
-// Ensure DB connection (and one-time admin seed) before every request
+// Ensure DB connection (and one-time admin seed) before API requests
 let seeded = false;
 app.use(async (req, res, next) => {
   try {
@@ -55,19 +61,10 @@ app.use(async (req, res, next) => {
     }
     next();
   } catch (error) {
+    console.error('DB CONNECT ERROR:', error);
     next(error);
   }
 });
-
-app.get('/', (req, res) => {
-  return res.send("Backend is running.");
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Backend is running' });
-});
-
-
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
@@ -76,7 +73,7 @@ app.use('/api/bills', require('./routes/bills'));
 // Centralized error-handling middleware
 app.use(errorHandler);
 
-// Only run a local server when NOT on Vercel (local dev)
+// Local server only (Vercel par nahi chalega)
 if (!process.env.VERCEL) {
   const PORT = process.env.PORT || 5000;
   app.listen(PORT, () => {
@@ -86,6 +83,3 @@ if (!process.env.VERCEL) {
 
 // Export app for Vercel's serverless runtime
 module.exports = app;
-
-
-
