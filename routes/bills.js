@@ -2,33 +2,17 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const Bill = require('../models/Bill');
 const { protect } = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
+const cloudinary = require('../config/cloudinary');
 
-// Ensure uploads folder exists
-const uploadDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Multer Storage setup
-const storage = multer.diskStorage({
-  destination(req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename(req, file, cb) {
-    cb(
-      null,
-      `${file.fieldname}-${Date.now()}${path.extname(file.originalname)}`
-    );
-  },
-});
+// Multer in-memory storage (no files saved to local disk or uploads directory)
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit per image
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB limit per image
   fileFilter(req, file, cb) {
     const filetypes = /jpg|jpeg|png|webp|pdf/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
@@ -39,6 +23,54 @@ const upload = multer({
     cb(new Error('Images only! (JPEG, JPG, PNG, WEBP, PDF)'));
   },
 });
+
+// Helper function to stream memory buffer directly to Cloudinary
+const uploadToCloudinary = async (fileBuffer, mimetype = 'image/jpeg') => {
+  const cloudName = (process.env.CLOUDINARY_CLOUD_NAME || '').trim();
+  const apiKey = (process.env.CLOUDINARY_API_KEY || '').trim();
+  const apiSecret = (process.env.CLOUDINARY_API_SECRET || '').trim();
+  const folderName = (process.env.CLOUDINARY_FOLDER || 'Bill-Management-System').trim();
+
+  if (!cloudName || !apiKey || !apiSecret) {
+    const missing = [
+      !cloudName && 'CLOUDINARY_CLOUD_NAME',
+      !apiKey && 'CLOUDINARY_API_KEY',
+      !apiSecret && 'CLOUDINARY_API_SECRET',
+    ].filter(Boolean).join(', ');
+    const errMsg = `Cloudinary credentials missing in environment: ${missing}. Please configure them in your deployment environment variables or server.env.`;
+    console.error(errMsg);
+    const err = new Error(errMsg);
+    err.status = 500;
+    throw err;
+  }
+
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: folderName,
+        resource_type: 'auto',
+      },
+      (error, result) => {
+        if (error) {
+          const detail = error.message || error.error?.message || JSON.stringify(error);
+          console.error(`Cloudinary upload failed (HTTP ${error.http_code || 403}):`, detail);
+
+          const userFriendlyMsg = `Cloudinary upload error (${error.http_code}): ${detail}`;
+          const uploadErr = new Error(userFriendlyMsg);
+          uploadErr.status = error.http_code || 500;
+          return reject(uploadErr);
+        }
+
+        if (!result || !result.secure_url) {
+          return reject(new Error('Cloudinary response missing secure_url'));
+        }
+
+        resolve(result.secure_url);
+      }
+    );
+    stream.end(fileBuffer);
+  });
+};
 
 // All bill routes are protected by admin auth
 router.use(protect);
@@ -66,12 +98,12 @@ router.get(
       queryFilter = { phoneNumber: regex };
     } else {
       queryFilter = {
-        $or: [{ userId: regex }, { phoneNumber: regex }, { username: regex }],
+        $or: [{ userId: regex }, { phoneNumber: regex }],
       };
     }
 
     const bills = await Bill.find(queryFilter)
-      .select('userId username phoneNumber')
+      .select('userId phoneNumber')
       .sort({ createdAt: -1 })
       .limit(20);
 
@@ -81,7 +113,6 @@ router.get(
       if (!suggestionsMap.has(key)) {
         suggestionsMap.set(key, {
           userId: item.userId,
-          username: item.username,
           phoneNumber: item.phoneNumber,
         });
       }
@@ -92,29 +123,26 @@ router.get(
 );
 
 // @route   GET /api/bills/due-today
-// @desc    Get today's due bills strictly for notification badge/panel
+// @desc    Get bills marked for notification (deduplicated by stable billId / order ID)
 // @access  Private
 router.get(
   '/due-today',
   asyncHandler(async (req, res) => {
-    const now = new Date();
+    const bills = await Bill.find({ notify: true }).sort({ updatedAt: -1, createdAt: -1 });
 
-    // Start & End of today in Local calendar date
-    const startOfLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-    const endOfLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    // Deduplicate by stable order/bill ID so that an order only appears once in notifications
+    const seenBillIds = new Set();
+    const uniqueDueBills = [];
 
-    // Start & End of today in UTC calendar date
-    const startOfUtc = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
-    const endOfUtc = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999));
+    for (const bill of bills) {
+      const stableKey = bill.billId ? String(bill.billId).trim() : String(bill._id);
+      if (!seenBillIds.has(stableKey)) {
+        seenBillIds.add(stableKey);
+        uniqueDueBills.push(bill);
+      }
+    }
 
-    const dueBills = await Bill.find({
-      $or: [
-        { billDueDate: { $gte: startOfLocal, $lte: endOfLocal } },
-        { billDueDate: { $gte: startOfUtc, $lte: endOfUtc } },
-      ],
-    }).sort({ createdAt: -1 });
-
-    res.json(dueBills);
+    res.json(uniqueDueBills);
   })
 );
 
@@ -123,48 +151,63 @@ router.get(
 // @access  Private
 router.post(
   '/',
-  upload.array('images', 5),
+  upload.array('images'),
   asyncHandler(async (req, res) => {
     const {
       billId,
       billName,
-      username,
       userId,
       phoneNumber,
       billEntryDate,
       billDueDate,
       amount,
       comment,
+      notify,
     } = req.body;
 
     if (
       !billId ||
       !billName ||
-      !username ||
       !userId ||
       !phoneNumber ||
-      !billEntryDate ||
-      !billDueDate
+      !billEntryDate
     ) {
       res.status(400);
       throw new Error('Please fill in all required fields');
     }
 
-    const imagePaths = req.files
-      ? req.files.map((file) => `/uploads/${file.filename}`)
-      : [];
+    const notifyValue = notify === true || notify === 'true';
+    const cleanBillId = String(billId).trim();
+
+    // Check if an existing notification already exists for this order/bill ID
+    let isReadValue = false;
+    if (notifyValue) {
+      const existingNotification = await Bill.findOne({ billId: cleanBillId, notify: true });
+      if (existingNotification) {
+        // Preserve read status from existing notification so duplicate unread count is not created
+        isReadValue = Boolean(existingNotification.isRead);
+      }
+    }
+
+    let imagePaths = [];
+    if (req.files && req.files.length > 0) {
+      imagePaths = await Promise.all(
+        req.files.map((file) => uploadToCloudinary(file.buffer, file.mimetype))
+      );
+    }
 
     const bill = new Bill({
-      billId: String(billId).trim(),
+      billId: cleanBillId,
       billName: String(billName).trim(),
-      username: String(username).trim(),
       userId: String(userId).trim(),
       phoneNumber: String(phoneNumber).trim(),
       billEntryDate: new Date(billEntryDate),
-      billDueDate: new Date(billDueDate),
+      billDueDate: billDueDate ? new Date(billDueDate) : undefined,
       amount: amount ? Number(amount) : 0,
       comment: comment ? String(comment).trim() : '',
       images: imagePaths,
+      notify: notifyValue,
+      isRead: isReadValue,
     });
 
     const createdBill = await bill.save();
@@ -188,7 +231,6 @@ router.get(
         $or: [
           { billId: regex },
           { billName: regex },
-          { username: regex },
           { userId: regex },
           { phoneNumber: regex },
           { comment: regex },
@@ -250,7 +292,7 @@ router.get(
 // @access  Private
 router.put(
   '/:id',
-  upload.array('images', 5),
+  upload.array('images'),
   asyncHandler(async (req, res) => {
     const bill = await Bill.findById(req.params.id);
     if (!bill) {
@@ -261,7 +303,6 @@ router.put(
     const {
       billId,
       billName,
-      username,
       userId,
       phoneNumber,
       billEntryDate,
@@ -269,34 +310,84 @@ router.put(
       amount,
       comment,
       existingImages,
+      notify,
     } = req.body;
 
     if (billId) bill.billId = String(billId).trim();
     if (billName) bill.billName = String(billName).trim();
-    if (username) bill.username = String(username).trim();
+
     if (userId) bill.userId = String(userId).trim();
     if (phoneNumber) bill.phoneNumber = String(phoneNumber).trim();
     if (billEntryDate) bill.billEntryDate = new Date(billEntryDate);
     if (billDueDate) bill.billDueDate = new Date(billDueDate);
     if (amount !== undefined) bill.amount = Number(amount);
     if (comment !== undefined) bill.comment = String(comment).trim();
+    const prevNotify = Boolean(bill.notify);
+    if (notify !== undefined) {
+      const notifyVal = notify === true || notify === 'true';
+      bill.notify = notifyVal;
+
+      if (!prevNotify && notifyVal) {
+        // Newly enabled notification: reset isRead so it becomes an active unread notification
+        bill.isRead = false;
+        if (bill.billId) {
+          await Bill.updateMany(
+            { billId: bill.billId },
+            { $set: { notify: true, isRead: false } }
+          );
+        }
+      } else {
+        // Synchronize notify setting across any other records with the same billId to prevent duplicates
+        if (bill.billId) {
+          await Bill.updateMany(
+            { billId: bill.billId, _id: { $ne: bill._id } },
+            { $set: { notify: notifyVal } }
+          );
+        }
+      }
+    }
 
     let finalImages = [];
-    if (existingImages) {
+    if (existingImages !== undefined) {
       finalImages = Array.isArray(existingImages) ? existingImages : [existingImages];
-    } else if (req.body.keepExistingImages === 'true' || req.body.keepExistingImages === true) {
+    } else {
       finalImages = bill.images || [];
     }
 
     if (req.files && req.files.length > 0) {
-      const newImagePaths = req.files.map((file) => `/uploads/${file.filename}`);
-      finalImages = [...finalImages, ...newImagePaths];
+      const newImageUrls = await Promise.all(
+        req.files.map((file) => uploadToCloudinary(file.buffer, file.mimetype))
+      );
+      finalImages = [...finalImages, ...newImageUrls];
     }
 
     bill.images = finalImages;
 
     const updatedBill = await bill.save();
     res.json(updatedBill);
+  })
+);
+
+// @route   PUT /api/bills/:id/read
+// @desc    Mark a bill notification as read
+// @access  Private
+router.put(
+  '/:id/read',
+  asyncHandler(async (req, res) => {
+    const bill = await Bill.findById(req.params.id);
+    if (!bill) {
+      res.status(404);
+      throw new Error('Bill not found');
+    }
+    bill.isRead = true;
+    await bill.save();
+    if (bill.billId) {
+      await Bill.updateMany(
+        { billId: bill.billId },
+        { $set: { isRead: true } }
+      );
+    }
+    res.json({ success: true, billId: bill.billId, isRead: true });
   })
 );
 

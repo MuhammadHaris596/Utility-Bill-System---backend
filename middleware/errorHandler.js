@@ -20,10 +20,7 @@ const errorHandler = (err, req, res, next) => {
     statusCode = 400;
   }
 
-  const responseMessage =
-    statusCode === 500
-      ? 'An unexpected server error occurred. Please try again later.'
-      : err.message || 'Request failed';
+  const responseMessage = err.message || 'An unexpected server error occurred. Please try again later.';
 
   res.status(statusCode).json({
     message: responseMessage,

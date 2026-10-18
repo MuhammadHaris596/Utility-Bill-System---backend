@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const Counter = require('./Counter');
 
 const billSchema = new mongoose.Schema(
   {
@@ -10,10 +11,6 @@ const billSchema = new mongoose.Schema(
     billName: {
       type: String,
       required: [true, 'Please add a bill name'],
-    },
-    username: {
-      type: String,
-      required: [true, 'Please add a username'],
     },
     userId: {
       type: String,
@@ -34,9 +31,10 @@ const billSchema = new mongoose.Schema(
       type: Date,
       required: [true, 'Please add a bill entry date'],
     },
+    // Due date is now optional; retain for backward compatibility
     billDueDate: {
       type: Date,
-      required: [true, 'Please add a bill due date'],
+      required: false,
     },
     amount: {
       type: Number,
@@ -46,10 +44,45 @@ const billSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    notify: {
+      type: Boolean,
+      default: false,
+    },
+    isRead: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,
   }
 );
+
+// Add auto-incrementing recordNumber for display purposes
+billSchema.add({
+  recordNumber: { type: Number, unique: true, sparse: true },
+});
+
+billSchema.pre('save', async function () {
+  if (!this.recordNumber) {
+    try {
+      const counter = await Counter.findOneAndUpdate(
+        { _id: 'billRecordNumber' },
+        { $inc: { seq: 1 } },
+        { returnDocument: 'after', upsert: true }
+      );
+      this.recordNumber = counter ? counter.seq : 1;
+    } catch (err) {
+      console.error('Error generating recordNumber:', err);
+      // Fallback: estimate from count or timestamp to avoid failing bill creation
+      try {
+        const count = await mongoose.model('Bill').countDocuments();
+        this.recordNumber = count + 1;
+      } catch (countErr) {
+        this.recordNumber = Date.now() % 1000;
+      }
+    }
+  }
+});
 
 module.exports = mongoose.model('Bill', billSchema);
