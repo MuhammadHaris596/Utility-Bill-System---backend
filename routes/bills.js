@@ -123,11 +123,14 @@ router.get(
 );
 
 // @route   GET /api/bills/due-today
-// @desc    Get bills marked for notification (deduplicated by stable billId / order ID)
+// @desc    Get bills marked for notification (deduplicated by stable billId / order ID, repeats every 3 days while ON)
 // @access  Private
 router.get(
   '/due-today',
   asyncHandler(async (req, res) => {
+    const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+    const now = new Date();
+
     const bills = await Bill.find({ notify: true }).sort({ updatedAt: -1, createdAt: -1 });
 
     // Deduplicate by stable order/bill ID so that an order only appears once in notifications
@@ -138,6 +141,23 @@ router.get(
       const stableKey = bill.billId ? String(bill.billId).trim() : String(bill._id);
       if (!seenBillIds.has(stableKey)) {
         seenBillIds.add(stableKey);
+
+        // 3-day recurring interval check:
+        // If slider is ON and 3 days have elapsed since lastNotifiedAt,
+        // trigger the next scheduled notification occurrence (reset isRead = false and advance lastNotifiedAt)
+        const initialTime = bill.lastNotifiedAt || bill.createdAt || bill.updatedAt || now;
+        const diffMs = now.getTime() - new Date(initialTime).getTime();
+
+        if (diffMs >= THREE_DAYS_MS) {
+          bill.isRead = false;
+          bill.lastNotifiedAt = now;
+
+          const updateFilter = bill.billId ? { billId: bill.billId } : { _id: bill._id };
+          Bill.updateMany(updateFilter, { $set: { isRead: false, lastNotifiedAt: now } }).catch((err) => {
+            console.error('Failed to update recurring notification schedule:', err);
+          });
+        }
+
         uniqueDueBills.push(bill);
       }
     }
@@ -181,11 +201,14 @@ router.post(
 
     // Check if an existing notification already exists for this order/bill ID
     let isReadValue = false;
+    let lastNotifiedAtValue = null;
     if (notifyValue) {
+      lastNotifiedAtValue = new Date();
       const existingNotification = await Bill.findOne({ billId: cleanBillId, notify: true });
       if (existingNotification) {
-        // Preserve read status from existing notification so duplicate unread count is not created
+        // Preserve read status and schedule from existing notification so duplicate unread count is not created
         isReadValue = Boolean(existingNotification.isRead);
+        lastNotifiedAtValue = existingNotification.lastNotifiedAt || lastNotifiedAtValue;
       }
     }
 
@@ -208,6 +231,7 @@ router.post(
       images: imagePaths,
       notify: notifyValue,
       isRead: isReadValue,
+      lastNotifiedAt: lastNotifiedAtValue,
     });
 
     const createdBill = await bill.save();
@@ -329,15 +353,29 @@ router.put(
 
       if (!prevNotify && notifyVal) {
         // Newly enabled notification: reset isRead so it becomes an active unread notification
+        // and start the 3-day recurring notification schedule from now
+        const now = new Date();
         bill.isRead = false;
+        bill.lastNotifiedAt = now;
         if (bill.billId) {
           await Bill.updateMany(
             { billId: bill.billId },
-            { $set: { notify: true, isRead: false } }
+            { $set: { notify: true, isRead: false, lastNotifiedAt: now } }
+          );
+        }
+      } else if (!notifyVal) {
+        // Turned OFF: stop future scheduled notifications immediately and remove from notifications
+        if (bill.billId) {
+          await Bill.updateMany(
+            { billId: bill.billId, _id: { $ne: bill._id } },
+            { $set: { notify: false } }
           );
         }
       } else {
         // Synchronize notify setting across any other records with the same billId to prevent duplicates
+        if (!bill.lastNotifiedAt) {
+          bill.lastNotifiedAt = bill.createdAt || new Date();
+        }
         if (bill.billId) {
           await Bill.updateMany(
             { billId: bill.billId, _id: { $ne: bill._id } },

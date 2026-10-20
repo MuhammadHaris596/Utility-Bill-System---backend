@@ -52,6 +52,10 @@ const billSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    lastNotifiedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
