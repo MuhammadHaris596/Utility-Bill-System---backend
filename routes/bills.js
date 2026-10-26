@@ -251,15 +251,15 @@ router.get(
     if (search && typeof search === 'string' && search.trim() !== '') {
       const sanitized = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(sanitized, 'i');
-      query = {
-        $or: [
-          { billId: regex },
-          { billName: regex },
-          { userId: regex },
-          { phoneNumber: regex },
-          { comment: regex },
-        ],
-      };
+      const orConditions = [{ phoneNumber: regex }];
+
+      // Search by Record Number (Record ID)
+      const parsedNum = parseInt(search.trim().replace(/\D/g, ''), 10);
+      if (!isNaN(parsedNum)) {
+        orConditions.push({ recordNumber: parsedNum });
+      }
+
+      query = { $or: orConditions };
     }
 
     const totalBills = await Bill.countDocuments(query);
